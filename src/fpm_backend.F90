@@ -27,7 +27,8 @@
 !>
 module fpm_backend
 
-use,intrinsic :: iso_fortran_env, only : stdin=>input_unit, stdout=>output_unit, stderr=>error_unit
+use,intrinsic :: iso_fortran_env, only : stdin=>input_unit, stdout=>output_unit, stderr=>error_unit, &
+                                         int64, real64
 use fpm_error, only : fpm_stop, error_t
 use fpm_filesystem, only: basename, dirname, join_path, exists, mkdir, run, getline
 use fpm_model, only: fpm_model_t
@@ -54,15 +55,18 @@ end interface
 contains
 
 !> Top-level routine to build package described by `model`
-subroutine build_package(targets,model,verbose,dry_run)
+subroutine build_package(targets,model,verbose,dry_run,show_timing)
     type(build_target_ptr), intent(inout) :: targets(:)
     type(fpm_model_t), intent(in) :: model
     logical, intent(in) :: verbose
-    
-    !> If dry_run, the build process is only mocked, but the list of compile_commands 
+
+    !> If dry_run, the build process is only mocked, but the list of compile_commands
     !> is still created
     logical, intent(in) :: dry_run
- 
+
+    !> Report per-target wall-clock build time and a total
+    logical, intent(in), optional :: show_timing
+
     integer :: i, j
     type(build_target_ptr), allocatable :: queue(:)
     integer, allocatable :: schedule_ptr(:), stat(:)
@@ -72,7 +76,16 @@ subroutine build_package(targets,model,verbose,dry_run)
     type(error_t), allocatable :: error
 
     type(build_progress_t) :: progress
-    logical :: plain_output
+    logical :: plain_output, timing_on
+
+    !> Wall-clock timing state. `crate` (clock rate) is queried once before the
+    !> parallel region and only read inside it; per-target start/stop counters are
+    !> thread-private so each thread times its own target's wall-clock duration.
+    integer(int64) :: t_start, t_end, t_build_start, t_build_end
+    real(real64) :: crate, elapsed
+
+    timing_on = .false.
+    if (present(show_timing)) timing_on = show_timing
 
     ! Need to make output directory for include (mod) files
     allocate(build_dirs(0))
@@ -115,13 +128,17 @@ subroutine build_package(targets,model,verbose,dry_run)
     plain_output = .true.
 #endif
 
-    progress = build_progress_t(queue,plain_output,model%build_dir)
+    progress = build_progress_t(queue,plain_output,model%build_dir,timing_on)
+
+    ! Query the clock rate once; it is constant and read-only inside the parallel
+    ! region. Stamp the overall build start for the reported total wall-clock time.
+    call system_clock(count=t_build_start, count_rate=crate)
 
     ! Loop over parallel schedule regions
     do i=1,size(schedule_ptr)-1
 
         ! Build targets in schedule region i
-        !$omp parallel do default(shared) private(skip_current) schedule(dynamic,1)
+        !$omp parallel do default(shared) private(skip_current,t_start,t_end,elapsed) schedule(dynamic,1)
         do j=schedule_ptr(i),(schedule_ptr(i+1)-1)
 
             ! Check if build already failed
@@ -130,9 +147,12 @@ subroutine build_package(targets,model,verbose,dry_run)
 
             if (.not.skip_current) then
                 if (.not.dry_run) call progress%compiling_status(j)
+                call system_clock(count=t_start)
                 call build_target(model,queue(j)%ptr,verbose,dry_run, &
                                   progress%compile_commands,stat(j))
-                if (.not.dry_run) call progress%completed_status(j,stat(j))
+                call system_clock(count=t_end)
+                elapsed = real(t_end - t_start, real64)/crate
+                if (.not.dry_run) call progress%completed_status(j,stat(j),elapsed)
             end if
 
             ! Set global flag if this target failed to build
@@ -161,7 +181,8 @@ subroutine build_package(targets,model,verbose,dry_run)
 
     end do
 
-    if (.not.dry_run) call progress%success()
+    call system_clock(count=t_build_end)
+    if (.not.dry_run) call progress%success(real(t_build_end - t_build_start, real64)/crate)
     call progress%dump_commands(error)
     if (allocated(error)) call fpm_stop(1,'error writing compile_commands.json: '//trim(error%message))
 

@@ -78,6 +78,7 @@ type, extends(fpm_cmd_settings)  :: fpm_build_settings
     logical                      :: show_model=.false.
     logical                      :: build_tests=.false.
     logical                      :: prune=.true.
+    logical                      :: show_timing=.true.
     character(len=:),allocatable :: dump
     character(len=:),allocatable :: compiler
     character(len=:),allocatable :: c_compiler
@@ -174,6 +175,9 @@ character(len=80), parameter :: help_text_build_common(*) = [character(len=80) :
     '                   fpm.toml). Cannot be used with --profile.                   ',&
     '                   Example: `fpm build --features mpi,openmp,hdf5 `             ',&
     ' --no-prune        Disable tree-shaking/pruning of unused module dependencies   ',&
+    ' --no-timing       Disable per-target build timing (shown by default).          ',&
+    '                   Reported times are per-target; with parallel builds their sum ',&
+    '                   exceeds the reported total wall-clock build time.             ',&
     ' --build-dir DIR   Specify the build directory. Default is "build" unless set   ',&
     '                   by the environment variable FPM_BUILD_DIR.                   '&
     ]
@@ -304,6 +308,7 @@ contains
           ' --profile " "' // &
           ' --features " "' // &
           ' --no-prune F' // &
+          ' --no-timing F' // &
           ' --compiler "'//get_fpm_env(fc_env, fc_default)//'"' // &
           ' --c-compiler "'//get_fpm_env(cc_env, cc_default)//'"' // &
           ' --cxx-compiler "'//get_fpm_env(cxx_env, cxx_default)//'"' // &
@@ -1678,6 +1683,7 @@ contains
         
         ! Assign into this (polymorphic) object; allocatable chars auto-allocate        
         self%prune         = .not. lget('no-prune')
+        self%show_timing   = .not. lget('no-timing')
         self%compiler      = comp
         self%c_compiler    = ccomp
         self%cxx_compiler  = cxcomp
